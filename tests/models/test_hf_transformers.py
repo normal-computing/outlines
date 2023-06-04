@@ -2,11 +2,16 @@ import outlines
 
 outlines.disable_cache()
 
+import numpy as np  # noqa
 import pytest  # noqa
 
-from outlines.models.hf_transformers import HuggingFaceCompletion  # noqa
+from outlines.models.hf_transformers import (  # noqa
+    HuggingFaceCompletion,
+    HuggingFaceEmbeddings,
+)
 
 TEST_MODEL = "hf-internal-testing/tiny-random-GPTJForCausalLM"
+EMBED_MODEL = "sentence-transformers/all-MiniLM-L12-v2"
 
 
 def test_samples():
@@ -76,3 +81,27 @@ def test_is_in_multiple_samples():
 def test_stop_at_multiple_samples():
     model = HuggingFaceCompletion(TEST_MODEL, max_tokens=10)
     model("test", stop_at=[" "], samples=2)
+
+
+def test_single_embedding():
+    model = HuggingFaceEmbeddings(EMBED_MODEL)
+    out = model("This is a test sentence")
+    assert isinstance(out, np.ndarray)
+    assert out.shape[0] == 1
+    assert out.shape[1] == 384
+
+
+def test_multiple_embedding():
+    model = HuggingFaceEmbeddings(EMBED_MODEL)
+    out = model(["This is a test sentence", "Another test sentence"])
+    assert isinstance(out, np.ndarray)
+    assert out.shape[0] == 2
+    assert out.shape[1] == 384
+
+
+def test_batch_embeddings():
+    model = HuggingFaceEmbeddings(EMBED_MODEL)
+    out = model(["This is a test sentence", "Another test sentence"], batch_size=4)
+    assert isinstance(out, np.ndarray)
+    assert out.shape[0] == 2
+    assert out.shape[1] == 384

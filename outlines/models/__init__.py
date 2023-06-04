@@ -7,5 +7,5 @@ codebase.
 """
 from . import image_generation, text_completion
 from .hf_diffusers import HuggingFaceDiffuser
-from .hf_transformers import HuggingFaceCompletion
+from .hf_transformers import HuggingFaceCompletion, HuggingFaceEmbeddings
 from .openai import OpenAICompletion, OpenAIEmbeddings, OpenAIImageGeneration

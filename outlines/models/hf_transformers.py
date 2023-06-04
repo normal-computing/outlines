@@ -1,5 +1,5 @@
 """Integration with HuggingFace's `transformers` library."""
-from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple, Union
 
 from outlines.caching import cache
 
@@ -421,3 +421,107 @@ def create_type_constraint(
         raise NotImplementedError(f"Cannot restrict the generation to type {type}")
 
     return type_to_mask[type](tokenizer, prompt_tokens)
+
+
+def HuggingFaceEmbeddings(model_name: str):
+    """Create a function that will download and run a HuggingFace embedding locally.
+
+    You should have the `transformers` package installed. Available models are listed
+    on the `HuggingFace documentation <https://huggingface.co/sentence-transformers`_.
+
+    Note: The first time this is run it might take 20-30 seconds to download the model weights.
+
+    Parameters
+    ----------
+    model_name: str
+        The model name as listed in the HuggingFace website.
+
+    Returns
+    -------
+    A function that will call run the HuggingFace embedding with the given parameters when
+    passed a prompt. It will use a GPU if there is one available.
+
+    """
+
+    def mean_pooling(model_output, attention_mask):
+        """Pools together the outputs from a sentence embedding model to generate a vector embedding."""
+        import torch
+
+        token_embeddings = model_output[0]
+        input_mask_expanded = (
+            attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
+        )
+        return torch.sum(token_embeddings * input_mask_expanded, 1) / torch.clamp(
+            input_mask_expanded.sum(1), min=1e-9
+        )
+
+    def get_embedding(
+        sentences: Union[List[str], str], *, batch_size: Optional[int] = None
+    ):
+        """Generates embeddings from mean-pooled sentence embeddings from HuggingFace sentence transformers.
+
+        Parameters
+        ----------
+        sentences
+            The strings to be embedded
+        batch_size: Optional[int]
+        The batch size. If it is not provided, or if a negative value is given, the embeddings will be run as a single batch.
+
+
+        Returns
+        -------
+        A function that will call run the HuggingFace embedding with the given parameters when
+        passed a prompt. It will use a GPU if there is one available.
+
+        """
+        import torch
+        from transformers import AutoModel, AutoTokenizer
+
+        # Set up sentence transformer (using appropriate resources)
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        model = AutoModel.from_pretrained(model_name)
+        if torch.cuda.is_available():
+            model = model.to("cuda")
+
+        # Do some padding and batching logic
+        if isinstance(sentences, str):
+            sentences = [sentences]
+
+        n_sentences = len(sentences)
+        if batch_size is None:
+            batch_size = n_sentences
+
+        if n_sentences % batch_size != 0:
+            pad = ((n_sentences // batch_size) + 1) * batch_size - n_sentences
+            sentences.extend(["PAD"] * pad)
+
+        embeddings_list = []
+
+        for i in range(0, len(sentences), batch_size):
+            batch_sentences = sentences[i : i + batch_size]
+            encoded_input = tokenizer(
+                batch_sentences,
+                padding=True,
+                truncation=True,
+                return_tensors="pt",
+            )
+
+            if torch.cuda.is_available():
+                encoded_input = encoded_input.to("cuda")
+
+            with torch.no_grad():
+                model_output = model(**encoded_input)
+
+            batch_embeddings = mean_pooling(
+                model_output, encoded_input["attention_mask"]
+            )
+            batch_embeddings = torch.nn.functional.normalize(
+                batch_embeddings, p=2, dim=1
+            )
+
+            embeddings_list.append(batch_embeddings)
+
+        embeddings_tensor = torch.cat(embeddings_list, dim=0)
+        return embeddings_tensor.cpu().numpy()[:n_sentences,]  # check slicing here
+
+    return get_embedding
