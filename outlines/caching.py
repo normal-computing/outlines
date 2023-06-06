@@ -56,3 +56,11 @@ def clear_cache():
     """Erase the cache completely."""
     global memory
     memory.storage.clear()
+
+
+def enable_cache():
+    """Enable the cache."""
+    global memory
+
+    if isinstance(memory, NoCache):
+        memory = Cache(serializer=JSONSerializer(), storage=LocalFileStorage(cache_dir))

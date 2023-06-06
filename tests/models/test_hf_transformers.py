@@ -23,6 +23,19 @@ def test_samples():
     assert len(answers) == 3
 
 
+def test_seed():
+    model = HuggingFaceCompletion(TEST_MODEL, max_tokens=10)
+
+    outlines.set_seed(48209)
+
+    answer1 = model("test")
+
+    outlines.set_seed(48209)
+
+    answer2 = model("test")
+    assert answer2 == answer1
+
+
 def test_type_int():
     model = HuggingFaceCompletion(TEST_MODEL, max_tokens=10)
     answer = model("test", type="int")

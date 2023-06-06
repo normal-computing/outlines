@@ -82,5 +82,6 @@ module = [
     "tiktoken.*",
     "torch",
     "transformers",
+    "tensorflow",
 ]
 ignore_missing_imports = true
