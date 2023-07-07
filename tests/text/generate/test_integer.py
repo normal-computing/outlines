@@ -2,11 +2,12 @@ import math
 
 import torch
 
-from outlines.text.generate.integer import integer
+from outlines.text.generate.regex import integer
 
 
 class Tokenizer:
     eos_token = "<EOS>"
+    pad_token = None
     eos_token_id = 0
     pad_token_id = -1
     vocabulary = {"<EOS>": 0, "00": 1, "1": 2, "0.": 3, "431": 4, "a": 5}
@@ -44,7 +45,7 @@ def test_integer_proposal():
     logits = torch.ones(len(model.tokenizer.vocabulary))
     result = generator.create_proposal(torch.tensor([[4]]), logits)
     assert torch.equal(
-        result, torch.tensor([[-math.inf, 1.0, 1.0, -math.inf, 1.0, -math.inf]])
+        result, torch.tensor([[1.0, 1.0, 1.0, -math.inf, 1.0, -math.inf]])
     )
 
     logits = torch.ones(len(model.tokenizer.vocabulary))
@@ -53,7 +54,7 @@ def test_integer_proposal():
         result,
         torch.tensor(
             [
-                [-math.inf, 1.0, 1.0, -math.inf, 1.0, -math.inf],
+                [1.0, 1.0, 1.0, -math.inf, 1.0, -math.inf],
                 [-math.inf, 1.0, 1.0, -math.inf, 1.0, -math.inf],
             ]
         ),
@@ -66,5 +67,17 @@ def test_integer_proposal():
         torch.tile(
             torch.tensor([[-math.inf, -math.inf, 1.0, -math.inf, 1.0, -math.inf]]),
             (4, 1),
+        ),
+    )
+
+    logits = torch.ones(len(model.tokenizer.vocabulary))
+    result = generator.create_proposal(torch.tensor([[4, 0], [2, 2]]), logits)
+    assert torch.equal(
+        result,
+        torch.tensor(
+            [
+                [1.0, -math.inf, -math.inf, -math.inf, -math.inf, -math.inf],
+                [1.0, 1.0, 1.0, -math.inf, 1.0, -math.inf],
+            ]
         ),
     )

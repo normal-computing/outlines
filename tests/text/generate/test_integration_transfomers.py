@@ -3,7 +3,7 @@ import torch
 
 import outlines.models as models
 from outlines.text.generate.continuation import continuation
-from outlines.text.generate.integer import integer
+from outlines.text.generate.regex import integer
 
 
 def test_transformers_integration_continuation():
