@@ -362,8 +362,12 @@ def map_partial_states_to_vocab(
     partial_match_filter: Callable[
         [str, Optional[int], Tuple[int, ...]], bool
     ] = lambda *args: True,
+    final_state_string: Optional[str] = None,
 ) -> DefaultDict[PartialParseState, Set[int]]:
-    """Construct a map from partial parse states to the vocabulary elements that start in those states.
+    """Construct a map from partial parse states to subsets of `vocabulary`.
+
+    The subsets of `vocabulary` consist of elements that are accepted by--or
+    transition to--the corresponding partial parse states.
 
     Parameters
     ----------
@@ -379,11 +383,19 @@ def map_partial_states_to_vocab(
         A callable that determines which partial matches to keep.  The first
         argument is the string being match, the rest are the unpacked partial
         match return values of `find_partial_matches`.
+    final_state_string
+        A string from `vocabulary` that is to be added to all the final states
+        in the FSM.
     """
 
+    final_state_string_idx = None
+    # Partial parse states to the subsets of the vocabulary that accept them
     pstate_to_vocab = defaultdict(set)
     for symbol_name, fsm in terminals_to_fsms_map.items():
         for i, vocab_string in enumerate(vocabulary):
+            if vocab_string == final_state_string:
+                final_state_string_idx = i
+
             for end_idx, state_seq in find_partial_matches(fsm, vocab_string):
                 if partial_match_filter(vocab_string, end_idx, state_seq):
                     pstate_to_vocab[(symbol_name, state_seq[0])].add(i)
@@ -391,7 +403,7 @@ def map_partial_states_to_vocab(
     if not map_to_antecedents:
         return pstate_to_vocab
 
-    # Partially parsed states to next/transition states (for the same terminal symbol)
+    # Partial parse states to their valid next/transition states
     ts_pstate_to_substates = dict(
         chain.from_iterable(
             [
@@ -402,7 +414,7 @@ def map_partial_states_to_vocab(
         )
     )
 
-    # Reverse the map
+    # Reverse the state transitions map
     # TODO: We could construct this more directly.
     rev_ts_pstate_to_substates = defaultdict(set)
     for pstate, to_pstates in ts_pstate_to_substates.items():
@@ -415,6 +427,12 @@ def map_partial_states_to_vocab(
     for pstate, vocab in pstate_to_vocab.items():
         for next_pstate in rev_ts_pstate_to_substates[pstate]:
             _pstate_to_vocab[next_pstate] |= vocab
+
+    if final_state_string_idx is not None:
+        # Allow transitions to EOS from all terminals FSM states
+        for symbol_name, fsm in terminals_to_fsms_map.items():
+            for state in fsm.finals:
+                _pstate_to_vocab[(symbol_name, state)].add(final_state_string_idx)
 
     return _pstate_to_vocab
 
