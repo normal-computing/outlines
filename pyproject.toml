@@ -39,6 +39,7 @@ dynamic = ["version"]
 test = [
     "diffusers",
     "pre-commit",
+    "pydantic",
     "pytest",
     "pytest-cov",
     "transformers",
