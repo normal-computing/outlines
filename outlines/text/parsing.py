@@ -261,9 +261,24 @@ def parse_to_end(parser_state: ParserState) -> Tuple[ParserState, Set[str]]:
 
 
 def find_partial_matches(
-    fsm: FSM, input_string: str
+    fsm: FSM, input_string: str, start_state: Optional[int] = None
 ) -> Set[Tuple[Optional[int], Tuple[int, ...]]]:
     """Find the states in the finite state machine `fsm` that accept `input_string`.
+
+    This will consider all possible states in the finite state machine (FSM)
+    that accept the beginning of `input_string` as starting points, unless a
+    specific `start_state` is provided.
+
+    Parameters
+    ----------
+    fsm
+        The finite state machine.
+    input_string
+        The string for which we generate partial matches.
+    start_state
+        A single fixed starting state to consider.  For example, if this value
+        is set to `fsm.initial`, it attempt to read `input_string` from the
+        beginning of the FSM/regular expression.
 
     Returns
     -------
@@ -281,7 +296,9 @@ def find_partial_matches(
 
     # TODO: We could probably memoize this easily (i.e. no need to recompute
     # paths shared by different starting states)
-    def _partial_match(trans: int) -> Optional[Tuple[Optional[int], Tuple[int, ...]]]:
+    def _partial_match(
+        trans: Dict[int, int]
+    ) -> Optional[Tuple[Optional[int], Tuple[int, ...]]]:
         fsm_map = ChainMap({fsm.initial: trans}, fsm.map)
         state = fsm.initial
         accepted_states: Tuple[int, ...] = ()
@@ -309,7 +326,10 @@ def find_partial_matches(
         return None if not terminated else i, accepted_states
 
     res = set()
-    for s_now, trans in fsm.map.items():
+    transition_maps = (
+        fsm.map.values() if start_state is None else [fsm.map[start_state]]
+    )
+    for trans in transition_maps:
         if trans_key in trans:
             path = _partial_match(trans)
             if path is not None:
