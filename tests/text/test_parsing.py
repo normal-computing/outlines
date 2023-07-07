@@ -30,27 +30,32 @@ def test_parse_to_end():
     )
 
     ip = pyparser.parse_interactive("x")
-    parser_state, expected_next_tokens = parse_to_end(ip.parser_state)
+    parser_state = copy_parser_state(ip.parser_state)
+    parser_state, expected_next_tokens = parse_to_end(parser_state)
     assert not parser_state.value_stack
     assert expected_next_tokens == {"NAME"}
 
     ip = pyparser.parse_interactive("x = '")
-    parser_state, expected_next_tokens = parse_to_end(ip.parser_state)
+    parser_state = copy_parser_state(ip.parser_state)
+    parser_state, expected_next_tokens = parse_to_end(parser_state)
     assert parser_state.value_stack[-1].type == "EQUAL"
     assert expected_next_tokens == {"LONG_STRING", "STRING"}
 
     ip = pyparser.parse_interactive("x = 'hi")
-    parser_state, expected_next_tokens = parse_to_end(ip.parser_state)
+    parser_state = copy_parser_state(ip.parser_state)
+    parser_state, expected_next_tokens = parse_to_end(parser_state)
     assert parser_state.value_stack[-1].type == "EQUAL"
     assert expected_next_tokens == {"STRING"}
 
     ip = pyparser.parse_interactive("x = ('hi")
-    parser_state, expected_next_tokens = parse_to_end(ip.parser_state)
+    parser_state = copy_parser_state(ip.parser_state)
+    parser_state, expected_next_tokens = parse_to_end(parser_state)
     assert parser_state.value_stack[-1].type == "LPAR"
     assert expected_next_tokens == {"STRING"}
 
     ip = pyparser.parse_interactive("def")
-    parser_state, expected_next_tokens = parse_to_end(ip.parser_state)
+    parser_state = copy_parser_state(ip.parser_state)
+    parser_state, expected_next_tokens = parse_to_end(parser_state)
     assert not parser_state.value_stack
     assert expected_next_tokens == {"NAME", "DEF"}
 
@@ -97,7 +102,7 @@ def test_sequential_parse_example():
         start="file_input",
     )
     ip = pyparser.parse_interactive("")
-    parser_state = ip.parser_state
+    parser_state = copy_parser_state(ip.parser_state)
 
     token_seq = ""
     for i, token in enumerate(input_tokens):
@@ -243,6 +248,9 @@ NAME: /[^\W\d]\w*/
     (parser_state,) = create_pmatch_parser_states(
         lp, terminals_to_states, term_type, ptoken, first_pmatch
     )
+    # These copies also patch the lexers in the parse state, which is now
+    # needed for use with `parse_to_end`
+    parser_state = copy_parser_state(parser_state)
     new_parser_state, expected_next_tokens = parse_to_end(parser_state)
     assert expected_next_tokens == {"NAME"}
 
@@ -252,6 +260,7 @@ NAME: /[^\W\d]\w*/
     (parser_state,) = create_pmatch_parser_states(
         lp, terminals_to_states, term_type, ptoken, first_pmatch
     )
+    parser_state = copy_parser_state(parser_state)
     new_parser_state, expected_next_tokens = parse_to_end(parser_state)
     assert not expected_next_tokens
 
@@ -261,6 +270,7 @@ NAME: /[^\W\d]\w*/
     (parser_state,) = create_pmatch_parser_states(
         lp, terminals_to_states, term_type, ptoken, first_pmatch
     )
+    parser_state = copy_parser_state(parser_state)
     with pytest.raises(UnexpectedToken):
         parse_to_end(parser_state)
 
