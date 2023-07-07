@@ -1,9 +1,11 @@
+import re
+
 import pytest
 import torch
 
 import outlines.models as models
 from outlines.text.generate.continuation import continuation
-from outlines.text.generate.integer import integer
+from outlines.text.generate.regex import integer, regex
 
 
 def test_transformers_integration_continuation():
@@ -49,6 +51,18 @@ def test_transformers_integration_integer():
     generated = sequence[len(prompt) :]
     assert generated[0] != 0
     int(generated)
+
+
+def test_transformers_various_regexes():
+    rng = torch.Generator()
+    rng.manual_seed(0)
+
+    model_name = "hf-internal-testing/tiny-random-GPTJForCausalLM"
+    model = models.transformers(model_name, device="cpu")
+    prompt = "Write an email address"
+    regex_str = r"([a-z]{10})@([a-z]{5})\.([a-z]{3})"
+    sequence = regex(model, regex_str)(prompt, rng=rng)
+    assert re.fullmatch(regex_str, sequence[len(prompt) :]) is not None
 
 
 def test_transformers_integration_integer_array():

@@ -1,2 +1,2 @@
 from .continuation import continuation
-from .integer import integer
+from .regex import integer, regex
