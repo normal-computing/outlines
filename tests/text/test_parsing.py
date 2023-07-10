@@ -206,6 +206,24 @@ def test_map_partial_states_to_vocab_python():
         ("DEF", 2): {3},
     }
 
+    vocabulary = list(vocabulary) + ["<EOS>"]
+    pstate_to_vocab = map_partial_states_to_vocab(
+        vocabulary, symbol_names_and_fsms, True, final_state_string="<EOS>"
+    )
+
+    assert dict(pstate_to_vocab) == {
+        ("__IGNORE_0", 1): {4, 5},
+        ("__IGNORE_0", 2): {4, 5},
+        ("__IGNORE_0", 0): {4},
+        ("NAME", 1): {0, 1, 2, 3, 5},
+        ("NAME", 2): {0, 1, 2, 3, 5},
+        ("NAME", 0): {0, 1, 2, 3},
+        ("DEF", 0): {0},
+        ("DEF", 1): {1, 2},
+        ("DEF", 2): {3},
+        ("DEF", 3): {5},
+    }
+
 
 def test_parse_from_partial_match():
     """Make sure we can continue parsing from an FSM-based partial match."""
@@ -266,11 +284,25 @@ NAME: /[^\W\d]\w*/
 
 
 def test_map_partial_states_to_vocab_regex():
-    regex_string = r"(([0-9]+)?([.]([0-9]*)?)?|[.][0-9]+)"
+    regex_string = r"([0-9]+([.][0-9]*)?|[.][0-9]+)"
     regex_pattern = interegular.parse_pattern(regex_string)
     regex_fsm = regex_pattern.simplify().to_fsm()
 
-    vocabulary = ["1.", "2", "3.", ".", ".80", "42", "1a", " ", "0", "a", "b", "$"]
+    vocabulary = [
+        "1.",
+        "2",
+        "3.",
+        ".",
+        ".80",
+        "42",
+        "1a",
+        " ",
+        "0",
+        "a",
+        "b",
+        "$",
+        "<EOS>",
+    ]
 
     # We want the vocabulary strings to entirely match the regex--not just the
     # prefixes of the vocabulary strings
@@ -280,50 +312,59 @@ def test_map_partial_states_to_vocab_regex():
         return True
 
     pstate_to_vocab = map_partial_states_to_vocab(
-        vocabulary, {"FLOAT": regex_fsm}, True, partial_match_filter
+        vocabulary, {"FLOAT": regex_fsm}, True, partial_match_filter, "<EOS>"
     )
 
-    assert dict(pstate_to_vocab) == {
-        ("FLOAT", 0): {0, 1, 2, 3, 4, 5, 8},
-        ("FLOAT", 3): {0, 1, 2, 3, 4, 5, 8},
-        ("FLOAT", 1): {0, 1, 2, 3, 4, 5, 8},
-        ("FLOAT", 5): {1, 5, 8},
-        ("FLOAT", 7): {1, 5, 8},
-        ("FLOAT", 4): {1, 5, 8},
-        ("FLOAT", 6): {1, 5, 8},
-        ("FLOAT", 2): {1, 5, 8},
-    }
+    assert tuple(pstate_to_vocab.values()) == (
+        {0, 1, 2, 3, 4, 5, 8},
+        {0, 1, 2, 3, 4, 5, 8, 12},
+        {0, 1, 2, 3, 4, 5, 8, 12},
+        {1, 5, 8, 12},
+        {1, 5, 8, 12},
+        {1, 5, 8, 12},
+        {1, 5, 8, 12},
+        {1, 5, 8},
+    )
 
     pstate_to_vocab = {k: tuple(v) for k, v in pstate_to_vocab.items()}
 
     random.seed(24080)
 
-    # Start at the initial state
-    pstate = ("FLOAT", regex_fsm.initial)
+    for n in range(50):
+        # Start at the initial state
+        pstate = ("FLOAT", regex_fsm.initial)
 
-    sample_seq = ""
+        sample_seq = ""
 
-    for i in range(10):
-        next_support = pstate_to_vocab[pstate]
+        for i in range(5):
+            next_support = pstate_to_vocab[pstate]
 
-        (next_sample_idx,) = random.sample(next_support, 1)
+            (next_sample_idx,) = random.sample(next_support, 1)
 
-        next_sample = vocabulary[next_sample_idx]
-        sample_seq += next_sample
+            next_sample = vocabulary[next_sample_idx]
 
-        # Parse the entire sampled sequence/string
-        # TODO: We could continue from the previous parse state, but this is
-        # easier for now and only for demonstration purposes.
-        partial_matches = find_partial_matches(regex_fsm, sample_seq)
+            if next_sample == "<EOS>":
+                break
 
-        # Use the/a longest match
-        pmatch = max(partial_matches, key=lambda x: x[0] if x[0] is not None else -1)
+            sample_seq += next_sample
 
-        # Create the next state
-        pstate = (pstate[0], pmatch[1][-1])
+            # Parse the entire sampled sequence/string
+            # TODO: We could continue from the previous parse state, but this is
+            # easier for now and only for demonstration purposes.
+            partial_matches = find_partial_matches(
+                regex_fsm, sample_seq, start_state=regex_fsm.initial
+            )
 
-        # TODO: We could check if the FSM is done (i.e. in an final/accept
-        # state) and end the sampling loop
+            # Use the/a longest match
+            pmatch = max(
+                partial_matches, key=lambda x: x[0] if x[0] is not None else -1
+            )
 
-    # Make sure the whole thing matches the regex
-    assert re.fullmatch(regex_string, sample_seq) is not None
+            # Create the next state
+            pstate = (pstate[0], pmatch[1][-1])
+
+            # TODO: We could check if the FSM is done (i.e. in an final/accept
+            # state) and end the sampling loop
+
+        # Make sure the whole thing matches the regex
+        assert re.fullmatch(regex_string, sample_seq) is not None
