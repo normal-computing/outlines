@@ -7,15 +7,17 @@ from typing import (
     Callable,
     DefaultDict,
     Dict,
+    Generator,
     Iterable,
     Optional,
+    Sequence,
     Set,
     Tuple,
 )
 
 import interegular
 import regex
-from interegular.fsm import FSM, anything_else
+from interegular.fsm import FSM, Alphabet, OblivionError, anything_else
 from interegular.patterns import Unsupported
 from lark import Lark, Token
 from lark.exceptions import (
@@ -29,7 +31,6 @@ from lark.lexer import BasicLexer, LexerState, Scanner
 from lark.parsers.lalr_analysis import Shift
 from lark.parsers.lalr_interactive_parser import InteractiveParser
 from lark.parsers.lalr_parser import ParseConf, ParserState
-from lark.utils import get_regexp_width
 
 if TYPE_CHECKING:
     from lark.lexer import LexerThread
@@ -50,14 +51,34 @@ class PartialScanner(Scanner):
         self.use_bytes = scanner.use_bytes
         self.match_whole = scanner.match_whole
         self.allowed_types = scanner.allowed_types
-        self._mres = scanner._mres
+        postfix = "$" if self.match_whole else ""
 
-    def match(self, text, pos) -> Optional[Tuple[str, Optional[str], bool]]:
-        for mre in self._mres:
-            m = mre.match(text, pos=pos, partial=True)
-            if m:  # and ((not m.partial) or m.endpos == len(text)):
-                return m.group(0), m.lastgroup, m.partial
-        return None
+        fsms = []
+        for t in self.terminals:
+            regex_str = t.pattern.to_regexp() + postfix
+            pattern = interegular.parse_pattern(regex_str).simplify()
+            _, max_len = pattern.lengths
+            fsm = pattern.to_fsm()
+            fsms.append(fsm)
+
+        self.fsm, self.fsms_to_transitions = fsm_union(fsms)
+
+    def match(self, text, pos):
+        """Get the match end position, terminal type, and final FSM state."""
+
+        res = find_partial_matches(self.fsm, text[pos:], start_state=self.fsm.initial)
+
+        if len(res) == 0:
+            return None
+
+        ((lex_end, state_seq),) = res
+
+        (fsm_id, has_transition) = next(
+            get_sub_fsms_from_seq(state_seq, self.fsm, self.fsms_to_transitions)
+        )
+        type_ = self.terminals[fsm_id]
+
+        return lex_end, type_, state_seq[-1] if not has_transition else None
 
 
 class PartialBasicLexer(BasicLexer):
@@ -79,36 +100,9 @@ class PartialBasicLexer(BasicLexer):
         else:
             self._scanner = None
 
-        # This is used to determine the token type for partial matches
-        self.terminal_to_regex = {}
-        for name, terminal in self.terminals_by_name.items():
-            self.terminal_to_regex[name] = self.re.compile(
-                terminal.pattern.to_regexp(), self.g_regex_flags
-            )
-
     def _build_scanner(self):
         super()._build_scanner()
         self._scanner = PartialScanner(self._scanner)
-
-    def partial_matches(self, value, type_):
-        partial_matches = set()
-
-        # TODO: It's unfortunate that we have to do this costly search (again).
-        # It would be better if we could *not* short-circuit the first time we
-        # scan in the call to `self.match`.
-        for term_name, term_regex in self.terminal_to_regex.items():
-            if term_name == type_:
-                # A standard lexed token result could actual indicate a partial
-                # match
-                regex_min, regex_max = get_regexp_width(term_regex.pattern)
-                if regex_min <= len(value) < regex_max:
-                    partial_matches.add(term_name)
-            else:
-                m = term_regex.match(value, partial=True)
-                if m:
-                    partial_matches.add(term_name)
-
-        return partial_matches
 
     def next_token(self, lex_state: LexerState, parser_state: Any = None) -> Token:
         line_ctr = lex_state.line_ctr
@@ -130,14 +124,18 @@ class PartialBasicLexer(BasicLexer):
                     terminals_by_name=self.terminals_by_name,
                 )
 
-            value, type_, partial = res
+            (
+                lex_end,
+                type_,
+                last_fsm_state,
+            ) = res
 
-            # Don't advance the lexing state if we're at the end; there could
-            # be ambiguous token types that aren't finished.
+            value = lex_state.text[line_ctr.char_pos : lex_end + 1]
+
+            # Don't advance the lexing state if we're at the end
             if line_ctr.char_pos + len(value) >= len(lex_state.text):
-                partial_matches = self.partial_matches(value, type_)
-                if partial_matches or partial:
-                    raise PartialTokenEOF(partial_matches)
+                if last_fsm_state is not None:
+                    raise PartialTokenEOF((type_.name, last_fsm_state))
 
             assert isinstance(self.callback, Dict)
 
@@ -245,25 +243,42 @@ def copy_ip(ip: "InteractiveParser") -> "InteractiveParser":
     return res
 
 
-def parse_to_end(parser_state: ParserState) -> Tuple[ParserState, Set[str]]:
-    """Continue parsing from the current parse state and return partial next tokens."""
+def parse_to_end(
+    parser_state: ParserState,
+) -> Tuple[ParserState, Tuple[Optional[str], Optional[int]]]:
+    """Continue parsing from the current parse state and return the terminal name and FSM state."""
 
     parser_state = copy_parser_state(parser_state)
 
-    expected_next_tokens: Set[str] = set()
+    terminal_name, fsm_state = None, None
     try:
         for token in parser_state.lexer.lex(parser_state):
             parser_state.feed_token(token)
     except PartialTokenEOF as e:
-        expected_next_tokens = e.expected
+        terminal_name, fsm_state = e.expected
 
-    return parser_state, expected_next_tokens
+    return parser_state, (terminal_name, fsm_state)
 
 
 def find_partial_matches(
-    fsm: FSM, input_string: str
+    fsm: FSM, input_string: str, start_state: Optional[int] = None
 ) -> Set[Tuple[Optional[int], Tuple[int, ...]]]:
     """Find the states in the finite state machine `fsm` that accept `input_string`.
+
+    This will consider all possible states in the finite state machine (FSM)
+    that accept the beginning of `input_string` as starting points, unless a
+    specific `start_state` is provided.
+
+    Parameters
+    ----------
+    fsm
+        The finite state machine.
+    input_string
+        The string for which we generate partial matches.
+    start_state
+        A single fixed starting state to consider.  For example, if this value
+        is set to `fsm.initial`, it attempt to read `input_string` from the
+        beginning of the FSM/regular expression.
 
     Returns
     -------
@@ -281,7 +296,9 @@ def find_partial_matches(
 
     # TODO: We could probably memoize this easily (i.e. no need to recompute
     # paths shared by different starting states)
-    def _partial_match(trans: int) -> Optional[Tuple[Optional[int], Tuple[int, ...]]]:
+    def _partial_match(
+        trans: Dict[int, int]
+    ) -> Optional[Tuple[Optional[int], Tuple[int, ...]]]:
         fsm_map = ChainMap({fsm.initial: trans}, fsm.map)
         state = fsm.initial
         accepted_states: Tuple[int, ...] = ()
@@ -309,7 +326,10 @@ def find_partial_matches(
         return None if not terminated else i, accepted_states
 
     res = set()
-    for s_now, trans in fsm.map.items():
+    transition_maps = (
+        fsm.map.values() if start_state is None else [fsm.map[start_state]]
+    )
+    for trans in transition_maps:
         if trans_key in trans:
             path = _partial_match(trans)
             if path is not None:
@@ -342,8 +362,12 @@ def map_partial_states_to_vocab(
     partial_match_filter: Callable[
         [str, Optional[int], Tuple[int, ...]], bool
     ] = lambda *args: True,
+    final_state_string: Optional[str] = None,
 ) -> DefaultDict[PartialParseState, Set[int]]:
-    """Construct a map from partial parse states to the vocabulary elements that start in those states.
+    """Construct a map from partial parse states to subsets of `vocabulary`.
+
+    The subsets of `vocabulary` consist of elements that are accepted by--or
+    transition to--the corresponding partial parse states.
 
     Parameters
     ----------
@@ -359,11 +383,19 @@ def map_partial_states_to_vocab(
         A callable that determines which partial matches to keep.  The first
         argument is the string being match, the rest are the unpacked partial
         match return values of `find_partial_matches`.
+    final_state_string
+        A string from `vocabulary` that is to be added to all the final states
+        in the FSM.
     """
 
+    final_state_string_idx = None
+    # Partial parse states to the subsets of the vocabulary that accept them
     pstate_to_vocab = defaultdict(set)
     for symbol_name, fsm in terminals_to_fsms_map.items():
         for i, vocab_string in enumerate(vocabulary):
+            if vocab_string == final_state_string:
+                final_state_string_idx = i
+
             for end_idx, state_seq in find_partial_matches(fsm, vocab_string):
                 if partial_match_filter(vocab_string, end_idx, state_seq):
                     pstate_to_vocab[(symbol_name, state_seq[0])].add(i)
@@ -371,7 +403,7 @@ def map_partial_states_to_vocab(
     if not map_to_antecedents:
         return pstate_to_vocab
 
-    # Partially parsed states to next/transition states (for the same terminal symbol)
+    # Partial parse states to their valid next/transition states
     ts_pstate_to_substates = dict(
         chain.from_iterable(
             [
@@ -382,7 +414,7 @@ def map_partial_states_to_vocab(
         )
     )
 
-    # Reverse the map
+    # Reverse the state transitions map
     # TODO: We could construct this more directly.
     rev_ts_pstate_to_substates = defaultdict(set)
     for pstate, to_pstates in ts_pstate_to_substates.items():
@@ -395,6 +427,12 @@ def map_partial_states_to_vocab(
     for pstate, vocab in pstate_to_vocab.items():
         for next_pstate in rev_ts_pstate_to_substates[pstate]:
             _pstate_to_vocab[next_pstate] |= vocab
+
+    if final_state_string_idx is not None:
+        # Allow transitions to EOS from all terminals FSM states
+        for symbol_name, fsm in terminals_to_fsms_map.items():
+            for state in fsm.finals:
+                _pstate_to_vocab[(symbol_name, state)].add(final_state_string_idx)
 
     return _pstate_to_vocab
 
@@ -437,3 +475,126 @@ def create_pmatch_parser_states(
         for state in terminals_to_states[term_type]
     )
     return res
+
+
+def fsm_union(fsms):
+    """Construct an FSM representing the union of the FSMs in `fsms`.
+
+    This is an updated version of `interegular.fsm.FSM.union` made to return an
+    extra map of component FSMs to the sets of state transitions that
+    correspond to them in the new FSM.
+
+    """
+
+    alphabet, new_to_old = Alphabet.union(*[fsm.alphabet for fsm in fsms])
+
+    indexed_fsms = tuple(enumerate(fsms))
+
+    initial = {i: fsm.initial for (i, fsm) in indexed_fsms}
+
+    # dedicated function accepts a "superset" and returns the next "superset"
+    # obtained by following this transition in the new FSM
+    def follow(current_state, new_transition: int):
+        next = {}
+        for i, f in indexed_fsms:
+            old_transition = new_to_old[i][new_transition]
+            if (
+                i in current_state
+                and current_state[i] in f.map
+                and old_transition in f.map[current_state[i]]
+            ):
+                next[i] = f.map[current_state[i]][old_transition]
+        if not next:
+            raise OblivionError
+        return next
+
+    # This is a dict that maps component FSMs to a running state
+    states = [initial]
+    finals = set()
+    map = {}
+
+    # Map component fsms to their new state-to-state transitions
+    fsms_to_transitions = defaultdict(set)
+
+    # iterate over a growing list
+    i = 0
+    while i < len(states):
+        state = states[i]
+
+        # Add to the finals of the aggregate FSM whenever we hit a final in a
+        # component FSM
+        if any(state.get(j, -1) in fsm.finals for (j, fsm) in indexed_fsms):
+            finals.add(i)
+
+        # compute map for this state
+        map[i] = {}
+        for transition in alphabet.by_transition:
+            try:
+                next = follow(state, transition)
+            except OblivionError:
+                # Reached an oblivion state. Don't list it.
+                continue
+            else:
+                try:
+                    # TODO: Seems like this could--and should--be avoided
+                    j = states.index(next)
+                except ValueError:
+                    j = len(states)
+                    states.append(next)
+
+                map[i][transition] = j
+
+                for fsm_id, fsm_state in next.items():
+                    fsms_to_transitions[fsm_id].add((i, j))
+
+        i += 1
+
+    return (
+        FSM(
+            alphabet=alphabet,
+            states=range(len(states)),
+            initial=0,
+            finals=finals,
+            map=map,
+            __no_validation__=True,
+        ),
+        fsms_to_transitions,
+    )
+
+
+def get_sub_fsms_from_seq(
+    state_seq: Sequence[int],
+    fsm: FSM,
+    fsms_to_transitions: Dict[int, Set[Tuple[int, int]]],
+) -> Generator[Tuple[int, bool], None, None]:
+    """Get the indices of the sub-FSMs in `fsm` along the state sequence `state_seq`.
+
+    Parameters
+    ----------
+    state_seq
+        A state sequence.
+    fsm
+        A FSM that is the union of sub-FSMs.
+    fsms_to_transitions
+        A map from FSM indices to sets of their state transitions.
+
+    Returns
+    -------
+    A generator returning tuples containing each sub-FSM index (in the order
+    they were union-ed to construct `fsm`) and booleans indicating whether or
+    not there is another valid transition from the last state in the sequence
+    for the associated sub-FSM (i.e. if the FSM can continue
+    accepting/matching).
+    """
+    pmatch_transitions = set(zip((fsm.initial,) + tuple(state_seq[:-1]), state_seq))
+    last_fsm_state = state_seq[-1]
+    yield from (
+        (
+            # The sub-FMS index
+            fsm_idx,
+            # Is there another possible transition in this sub-FSM?
+            any(last_fsm_state == from_s for (from_s, to_s) in transitions),
+        )
+        for fsm_idx, transitions in fsms_to_transitions.items()
+        if pmatch_transitions.issubset(transitions)
+    )
